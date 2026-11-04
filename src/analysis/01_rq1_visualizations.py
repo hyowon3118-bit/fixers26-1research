@@ -46,7 +46,8 @@ def make_summary(panel: pd.DataFrame) -> pd.DataFrame:
             "descriptive_slope": slope,
             "median_W_iqr": g["W_iqr"].median(),
             "median_W_sd": g["W_sd"].median(),
-            "cover50_rate": g["cover50"].mean(), "cover80_rate": g["cover80"].mean(),
+            "cover50_rate": g["cover50"].dropna().mean(),
+            "cover80_rate": g["cover80"].dropna().mean(),
         })
     return pd.DataFrame(rows)
 
@@ -74,6 +75,9 @@ def plot_series(panel: pd.DataFrame, series: str, output: Path) -> None:
     ax.axvline(0, color="#777777", linewidth=.8)
     ax.set(xlabel="Kalshi minus consensus gap (σ units)", ylabel="Realized surprise (σ units)",
            title="Gap vs. realized surprise")
+    if g.dropna(subset=["Gap", "S"]).empty:
+        ax.text(.5, .5, "No point-in-time consensus snapshots\navailable for these historical events",
+                ha="center", va="center", transform=ax.transAxes, fontsize=9)
     ax.legend(frameon=False, fontsize=8)
     ax.grid(alpha=.2)
 
@@ -84,6 +88,9 @@ def plot_series(panel: pd.DataFrame, series: str, output: Path) -> None:
         ax.plot(sub["release_date_actual"], sub["W_iqr"], marker="o", markersize=3,
                 linewidth=1.2, color=COLORS.get(int(h), None), label=f"h={int(h)} days")
     ax.set(xlabel="Release date", ylabel="Forecast IQR (σ units)", title="Distribution width")
+    if g.dropna(subset=["W_iqr"]).empty:
+        ax.text(.5, .5, "No estimable IQR values", ha="center", va="center",
+                transform=ax.transAxes, fontsize=9)
     ax.legend(frameon=False, fontsize=8)
     ax.grid(alpha=.2)
     fig.suptitle(f"RQ1 / {NAMES.get(series, series)}", fontsize=13)

@@ -213,9 +213,13 @@ def main() -> None:
 
     for (s, h), g in p.groupby(["series", "h"]):
         ok = g.dropna(subset=["S", "Gap"])
+        cover50 = g["cover50"].dropna().mean()
+        cover80 = g["cover80"].dropna().mean()
         logger.info("  %s h=%d: 분석 가능 %d/%d | corr(Gap,S) %.2f | |S| 평균 %.2f | W_iqr 중앙값 %.2f | 적중률 50%%구간 %.0f%% 80%%구간 %.0f%%",
                     s, h, len(ok), len(g), ok[["Gap", "S"]].corr().iloc[0, 1] if len(ok) > 2 else np.nan,
-                    ok["S"].abs().mean(), ok["W_iqr"].median(), 100 * ok["cover50"].mean(), 100 * ok["cover80"].mean())
+                    ok["S"].abs().mean(), ok["W_iqr"].median(),
+                    100 * cover50 if pd.notna(cover50) else np.nan,
+                    100 * cover80 if pd.notna(cover80) else np.nan)
     logger.info("[4/4] 결과 저장")
     p.to_parquet(PROCESSED / "event_panel.parquet", index=False)
     logger.info("저장 event_panel.parquet (%d행)", len(p))
