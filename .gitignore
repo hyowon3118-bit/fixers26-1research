@@ -11,3 +11,6 @@ __pycache__/
 *.pyc
 .DS_Store
 .ipynb_checkpoints/
+
+# 데이터에서 다시 만들 수 있는 큰 비교 표 (tests/compare_with_dkw.py가 생성)
+outputs/tables/compare_with_dkw.csv
