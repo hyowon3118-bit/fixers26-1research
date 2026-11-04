@@ -1,9 +1,9 @@
 """RQ1·RQ3용 이벤트 패널: Kalshi 이벤트 × 측정 시점(h)마다 분포 통계량과 연구 변수 계산.
 
 변수 정의 (연구설계 수정본 기준)
-  A        실제 발표치 (ForexFactory 실제치. ALFRED·Kalshi 정산 결과와 일치 확인됨)
-  F        ForexFactory 컨센서스
-  σ        해당 발표일 이전 (A − F)의 표준편차 (expanding, 코로나 기간 제외 설정 가능)
+  A        실제 발표치 (가능한 시리즈는 ALFRED 최초 발표치, 없으면 ForexFactory actual)
+  F        측정 horizon 날짜까지 수집된 ForexFactory 컨센서스 스냅샷
+  σ        같은 horizon에서 과거에 이용 가능했던 (A − F)의 expanding 표준편차
   S        (A − F) / σ                     표준화 서프라이즈
   K, M     Kalshi 분포의 평균, 중앙값 (원본 get_moments 값)
   Gap      (K − F) / σ,  Gap_median = (M − F) / σ
@@ -13,10 +13,11 @@
   E_K      |A − K| / σ                     Kalshi 자체 예측오차
   cover50  q25 ≤ A ≤ q75,  cover80  q10 ≤ A ≤ q90   예측구간 적중 여부
 
-분위수: 연속 분위수는 각 구간을 반올림 전 범위 (기준선 + 단위/2, 다음 기준선 + 단위/2]로 보고
-        구간 안 균등분포(Gürkaynak & Wolfers 2005)로 보간. 열린 꼬리 구간은 인접 구간 폭으로 닫음(Angelini 2026).
+분위수: 내부 구간은 반올림 전 범위 (기준선 + 단위/2, 다음 기준선 + 단위/2] 안에서 균등하다고 가정.
+        최저·최고 열린 꼬리 안에 분위수가 놓이면 유한한 경계가 식별되지 않으므로 해당 분위수는 결측.
         이산 분위수는 구간 값 = 기준선 + moment_adjustment에서 누적확률이 처음 p 이상인 값.
-측정 시점: Kalshi 거래 마감일(예정 발표일) h일 전 이하에서 가장 가까운 관측일
+측정 시점: 실제 발표일 h일 전 이하에서 가장 가까운 Kalshi 관측일. F도 그 날짜까지
+          수집된 스냅샷만 사용하며, 사후 수집된 과거 컨센서스는 결측 처리.
 
 입력: data/interim/kalshi_release_match.parquet, kalshi_moments.parquet, kalshi_dist.parquet, releases.parquet
 출력: data/processed/event_panel.parquet
@@ -37,18 +38,45 @@ INTERIM = PROJECT_ROOT / "data" / "interim"
 PROCESSED = PROJECT_ROOT / "data" / "processed"
 
 
-def expanding_sigma(rel: pd.DataFrame, exclude: tuple[str, str], min_obs: int) -> pd.DataFrame:
-    """각 발표일마다, 그 이전 발표들의 (A − F) 표준편차."""
-    r = rel.dropna(subset=["A_ff", "F"]).copy()
+ET = "America/New_York"
+
+
+def forecast_asof(events: pd.DataFrame, snapshots: pd.DataFrame, h: int,
+                  event_date_col: str) -> pd.DataFrame:
+    """h일 전까지 실제 수집된 마지막 컨센서스만 선택한다."""
+    ev = events[["series", event_date_col]].drop_duplicates().copy()
+    ev[event_date_col] = pd.to_datetime(ev[event_date_col]).dt.normalize()
+    snap = snapshots.dropna(subset=["F", "scraped_at_utc"]).copy()
+    snap["scraped_at_utc"] = pd.to_datetime(snap["scraped_at_utc"], utc=True, errors="coerce")
+    snap = snap.dropna(subset=["scraped_at_utc"])
+    snap["release_date_et"] = pd.to_datetime(snap["release_date_et"]).dt.date
+    snap["scrape_date_et"] = snap["scraped_at_utc"].dt.tz_convert(ET).dt.date
+    out = []
+    for _, e in ev.iterrows():
+        release_day = e[event_date_col]
+        target_day = (release_day - pd.Timedelta(days=h)).date()
+        cand = snap[(snap["series"] == e["series"]) &
+                    (snap["release_date_et"] == release_day.date()) &
+                    (snap["scrape_date_et"] <= target_day)]
+        f = cand.sort_values("scraped_at_utc").iloc[-1]["F"] if not cand.empty else np.nan
+        out.append({"series": e["series"], event_date_col: release_day.date(), "F_asof": f})
+    return pd.DataFrame(out)
+
+
+def expanding_sigma(rel: pd.DataFrame, forecasts: pd.DataFrame,
+                    exclude: tuple[str, str], min_obs: int) -> pd.DataFrame:
+    """같은 horizon에서 이용 가능했던 과거 (A − F)만으로 expanding SD 계산."""
+    r = rel.dropna(subset=["A"]).merge(forecasts, on=["series", "release_date_et"], how="left")
     r["d"] = pd.to_datetime(r["release_date_et"])
-    r["err"] = r["A_ff"] - r["F"]
+    r["err"] = r["A"] - r["F_asof"]
     use = ~r["d"].between(pd.Timestamp(exclude[0]), pd.Timestamp(exclude[1]))
     rows = []
     for s, g in r.groupby("series"):
         g = g.sort_values("d")
         for d in g["d"]:
-            past = g[(g["d"] < d) & use.loc[g.index]]["err"]
-            rows.append({"series": s, "release_date_actual": d.date(), "n_sigma": len(past),
+            mask = (g["d"] < d) & use.loc[g.index] & g["err"].notna()
+            past = g.loc[mask, "err"]
+            rows.append({"series": s, "release_date_et": d.date(), "n_sigma": len(past),
                          "sigma": past.std(ddof=1) if len(past) >= min_obs else np.nan})
     return pd.DataFrame(rows)
 
@@ -57,24 +85,33 @@ PROBS = (0.10, 0.25, 0.75, 0.90)
 
 
 def bin_edges(strikes: np.ndarray, unit: float) -> tuple[np.ndarray, np.ndarray]:
-    """각 분포 행의 연속 구간 (lo, hi].
-
-    행 j(기준선 s_j)의 확률은 '발표치 > s_j 이고 <= s_{j+1}'이고, 발표치는 unit 단위로 반올림되므로
-    반올림 전 값의 범위는 (s_j + unit/2, s_{j+1} + unit/2]. 맨 위 열린 구간은 바로 아래 구간과 같은 폭으로 닫음
-    (Angelini 2026의 '인접 격자 폭' 처리). 맨 아래 행은 원본 코드가 이미 '최저 기준선 − 간격'에 두므로 그대로 씀.
-    """
-    lo = strikes + unit / 2
-    last_width = strikes[-1] - strikes[-2] if len(strikes) > 1 else unit
-    hi = np.append(strikes[1:], strikes[-1] + last_width) + unit / 2
+    """내부 확률 구간의 경계. 최저·최고 확률 행은 열린 꼬리라 유한 경계를 두지 않는다."""
+    lo = np.full(len(strikes), np.nan)
+    hi = np.full(len(strikes), np.nan)
+    if len(strikes) > 1:
+        hi[0] = strikes[1] + unit / 2
+        lo[-1] = strikes[-1] + unit / 2
+    if len(strikes) > 2:
+        lo[1:-1] = strikes[1:-1] + unit / 2
+        hi[1:-1] = strikes[2:] + unit / 2
     return lo, hi
 
 
 def continuous_quantile(lo, hi, w, p) -> float:
-    """구간 안 균등분포 가정(Gürkaynak & Wolfers 2005)으로 분위수 보간."""
+    """내부 구간 균등 가정으로 보간; 분위수가 열린 꼬리에 놓이면 식별 불가로 NaN."""
     cw = np.cumsum(w)
-    j = int(np.argmax(cw >= p - 1e-12))
+    crossed = np.flatnonzero(cw >= p - 1e-12)
+    if not len(crossed):
+        return np.nan
+    j = int(crossed[0])
     prev = cw[j - 1] if j > 0 else 0.0
-    frac = (p - prev) / w[j] if w[j] > 0 else 0.0
+    if j == 0:
+        return float(hi[0]) if np.isclose(p, cw[0], atol=1e-12) else np.nan
+    if j == len(w) - 1:
+        return float(lo[-1]) if np.isclose(p, prev, atol=1e-12) else np.nan
+    if not np.isfinite(lo[j]) or not np.isfinite(hi[j]) or w[j] <= 0:
+        return np.nan
+    frac = (p - prev) / w[j]
     return float(lo[j] + frac * (hi[j] - lo[j]))
 
 
@@ -114,32 +151,41 @@ def main() -> None:
 
     logger.info("[1/4] 입력 로드")
     ev = pd.read_parquet(INTERIM / "kalshi_release_match.parquet")
-    ev = ev.dropna(subset=["F", "A_ff"])
+    ev = ev.dropna(subset=["A"])
     mom = pd.read_parquet(INTERIM / "kalshi_moments.parquet")
     dist = pd.read_parquet(INTERIM / "kalshi_dist.parquet")
     rel = pd.read_parquet(INTERIM / "releases.parquet")
+    forecasts = pd.read_parquet(INTERIM / "release_forecasts.parquet")
     logger.info("  컨센서스·실제치가 있는 정산 이벤트 %d개", len(ev))
 
-    logger.info("[2/4] σ 계산 (제외 기간 %s, 최소 %d건)", pcfg["sigma_exclude"], pcfg["sigma_min_obs"])
-    sig = expanding_sigma(rel, tuple(pcfg["sigma_exclude"]), pcfg["sigma_min_obs"])
-    ev = ev.merge(sig, on=["series", "release_date_actual"], how="left")
-    logger.info("  σ 없는 이벤트 %d개", int(ev["sigma"].isna().sum()))
-
-    logger.info("[3/4] 분포 분위수 계산")
+    logger.info("[2/4] 분포 분위수 계산")
     qs = quantiles(dist, adj)
     snap = mom.merge(qs, on=["contract_preamble", "date"], how="left")
     snap["date"] = pd.to_datetime(snap["date"])
 
-    logger.info("[4/4] 측정 시점별 패널 구성 (h=%s)", pcfg["horizons"])
+    logger.info("[3/4] 측정 시점별 패널 구성 (h=%s)", pcfg["horizons"])
     out = []
     for h in pcfg["horizons"]:
+        f_ev = forecast_asof(ev, forecasts, h, "release_date_actual")
+        f_rel = forecast_asof(rel, forecasts, h, "release_date_et")
+        sig = expanding_sigma(rel, f_rel, tuple(pcfg["sigma_exclude"]), pcfg["sigma_min_obs"])
+        logger.info("  h=%d: 측정시점 이전 컨센서스 결측 %d / σ 미산출 %d",
+                    h, int(f_ev["F_asof"].isna().sum()), int(sig["sigma"].isna().sum()))
         for _, e in ev.iterrows():
-            target = pd.Timestamp(e["release_date_et"]) - pd.Timedelta(days=h)
+            target = pd.Timestamp(e["release_date_actual"]) - pd.Timedelta(days=h)
             cand = snap[(snap["contract_preamble"] == e["event_ticker"]) & (snap["date"] <= target)]
+            frow = f_ev[(f_ev["series"] == e["series"]) &
+                        (f_ev["release_date_actual"] == pd.Timestamp(e["release_date_actual"]).date())]
+            f_h = frow["F_asof"].iloc[0] if not frow.empty else np.nan
+            srow = sig[(sig["series"] == e["series"]) &
+                       (sig["release_date_et"] == pd.Timestamp(e["release_date_actual"]).date())]
+            sigma = srow["sigma"].iloc[0] if not srow.empty else np.nan
+            n_sigma = srow["n_sigma"].iloc[0] if not srow.empty else 0
             row = {"h": h, "event_ticker": e["event_ticker"], "series": e["series"],
                    "ref_period": e["ref_period"], "release_date_et": e["release_date_et"],
                    "release_date_actual": e["release_date_actual"], "delay_days": e["delay_days"],
-                   "A": e["A_ff"], "F": e["F"], "sigma": e["sigma"], "n_sigma": e["n_sigma"]}
+                   "target_date": target.date(), "A": e["A"], "F": f_h,
+                   "sigma": sigma, "n_sigma": n_sigma}
             if not cand.empty:
                 c = cand.sort_values("date").iloc[-1]
                 stale = (target - c["date"]).days
@@ -156,14 +202,25 @@ def main() -> None:
     p["W_iqr_disc"] = (p["q75_disc"] - p["q25_disc"]) / p["sigma"]  # 강건성: 이산 IQR
     p["W_sd"] = p["dist_sd"] / p["sigma"]
     p["E_K"] = (p["A"] - p["K"]).abs() / p["sigma"]
-    p["cover50"] = np.where(p["K"].isna(), np.nan, (p["A"] >= p["q25"] - 1e-9) & (p["A"] <= p["q75"] + 1e-9))
-    p["cover80"] = np.where(p["K"].isna(), np.nan, (p["A"] >= p["q10"] - 1e-9) & (p["A"] <= p["q90"] + 1e-9))
+    p["cover50"] = pd.Series(pd.NA, index=p.index, dtype="boolean")
+    valid50 = p["q25"].notna() & p["q75"].notna()
+    p.loc[valid50, "cover50"] = ((p.loc[valid50, "A"] >= p.loc[valid50, "q25"] - 1e-9) &
+                                  (p.loc[valid50, "A"] <= p.loc[valid50, "q75"] + 1e-9))
+    p["cover80"] = pd.Series(pd.NA, index=p.index, dtype="boolean")
+    valid80 = p["q10"].notna() & p["q90"].notna()
+    p.loc[valid80, "cover80"] = ((p.loc[valid80, "A"] >= p.loc[valid80, "q10"] - 1e-9) &
+                                  (p.loc[valid80, "A"] <= p.loc[valid80, "q90"] + 1e-9))
 
     for (s, h), g in p.groupby(["series", "h"]):
         ok = g.dropna(subset=["S", "Gap"])
+        cover50 = g["cover50"].dropna().mean()
+        cover80 = g["cover80"].dropna().mean()
         logger.info("  %s h=%d: 분석 가능 %d/%d | corr(Gap,S) %.2f | |S| 평균 %.2f | W_iqr 중앙값 %.2f | 적중률 50%%구간 %.0f%% 80%%구간 %.0f%%",
                     s, h, len(ok), len(g), ok[["Gap", "S"]].corr().iloc[0, 1] if len(ok) > 2 else np.nan,
-                    ok["S"].abs().mean(), ok["W_iqr"].median(), 100 * ok["cover50"].mean(), 100 * ok["cover80"].mean())
+                    ok["S"].abs().mean(), ok["W_iqr"].median(),
+                    100 * cover50 if pd.notna(cover50) else np.nan,
+                    100 * cover80 if pd.notna(cover80) else np.nan)
+    logger.info("[4/4] 결과 저장")
     p.to_parquet(PROCESSED / "event_panel.parquet", index=False)
     logger.info("저장 event_panel.parquet (%d행)", len(p))
 
