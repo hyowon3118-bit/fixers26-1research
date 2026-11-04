@@ -7,10 +7,11 @@
   [2] ALFRED: 최초 발표 시점 기준 값 계산
       - CPI·core CPI: 지수라서 최초 발표 시점에 알려진 전월 지수로 전월비(%)를 계산하고 소수 1자리로 반올림
       - 실업률·GDP 속보치: 최초 발표치 그대로
-      - 고용(비농업)은 ALFRED를 받지 않아서 ForexFactory 실제치만 있음
+      - 분석 실제치 A는 ALFRED 최초치 우선, ALFRED 자료가 없는 고용은 ForexFactory 실제치
   [3] Kalshi 이벤트와 발표일로 연결하고, 각 실제치가 Kalshi 정산 구간 (lower, upper] 안에 드는지 확인
 
-출력: data/interim/releases.parquet (지표×발표일), data/interim/kalshi_release_match.parquet (Kalshi 이벤트별)
+출력: data/interim/releases.parquet (지표×발표일), release_forecasts.parquet (수집 시점별 컨센서스),
+      data/interim/kalshi_release_match.parquet (Kalshi 이벤트별)
 실행: python src/clean/02_releases.py
 """
 from __future__ import annotations
@@ -82,8 +83,24 @@ def load_forexfactory(logger) -> pd.DataFrame:
     bad = ff["forecast"].notna() & (ff["forecast"] != "") & ff["forecast_num"].isna()
     logger.info("  forecast 파싱 실패 %d건, 빈칸 %d건", int(bad.sum()), int((ff["forecast"].fillna("") == "").sum()))
 
-    ff = ff.sort_values("scraped_at_utc").drop_duplicates(["series", "release_date_et"], keep="last")
-    out = ff.rename(columns={"forecast_num": "F", "actual_num": "A_ff", "previous_num": "prev_ff"})
+    ff["scraped_at_utc"] = pd.to_datetime(ff["scraped_at_utc"], utc=True, errors="coerce")
+    ff = ff.rename(columns={"forecast_num": "F", "actual_num": "A_ff", "previous_num": "prev_ff"})
+    # 보관된 재수집본을 남겨야 발표 시점 이전의 컨센서스를 horizon별로 선택할 수 있다.
+    snapshots = ff[["series", "release_date_et", "time_text", "F", "scraped_at_utc"]].dropna(
+        subset=["scraped_at_utc"]
+    ).drop_duplicates(["series", "release_date_et", "scraped_at_utc"], keep="last")
+    snapshots.to_parquet(INTERIM / "release_forecasts.parquet", index=False)
+
+    # Actual은 실제치가 관측된 가장 최근 기록에서 가져오고, F는 호환용 최근값이다.
+    # RQ1에서는 이 F를 쓰지 않고 아래 snapshots에서 측정 시점별로 다시 선택한다.
+    actual = ff.sort_values("scraped_at_utc").dropna(subset=["A_ff"]).drop_duplicates(
+        ["series", "release_date_et"], keep="last"
+    )
+    latest = ff.sort_values("scraped_at_utc").drop_duplicates(["series", "release_date_et"], keep="last")
+    out = latest.drop(columns=["A_ff", "prev_ff"], errors="ignore").merge(
+        actual[["series", "release_date_et", "A_ff", "prev_ff"]],
+        on=["series", "release_date_et"], how="left"
+    )
     logger.info("  지표별 발표 건수 %s", out["series"].value_counts().to_dict())
     return out[["series", "release_date_et", "time_text", "F", "A_ff", "prev_ff", "scraped_at_utc"]]
 
@@ -147,6 +164,8 @@ def main() -> None:
     logger.info("[2/3] ALFRED 최초 발표치")
     al = pd.concat([alfred_first_release(s, sid, how) for s, (sid, how) in ALFRED.items()], ignore_index=True)
     rel = ff.merge(al, on=["series", "release_date_et"], how="left")
+    # 공식 최초 발표치가 있는 series는 이를 분석 target으로 사용하고, Payroll은 FF actual을 쓴다.
+    rel["A"] = rel["A_alfred"].combine_first(rel["A_ff"])
     both = rel.dropna(subset=["A_ff", "A_alfred"])
     agree = np.isclose(both["A_ff"], both["A_alfred"], atol=1e-9)
     logger.info("  ALFRED 연결 %d건 / ForexFactory %d건", rel["A_alfred"].notna().sum(), len(rel))
