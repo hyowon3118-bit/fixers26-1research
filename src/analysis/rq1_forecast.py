@@ -24,6 +24,7 @@
 
 입력: data/processed/event_panel.parquet
 출력: outputs/tables/rq1_insample.csv, rq1_oos.csv, rq1_h1c.csv, data/processed/rq1_oos_predictions.parquet
+      outputs/figures/rq1_oos_improvement.png, rq1_gap_vs_surprise.png (rq1_figures.py)
 실행: python src/analysis/rq1_forecast.py
 """
 from __future__ import annotations
@@ -38,6 +39,7 @@ from scipy.stats import norm
 from statsmodels.stats.multitest import multipletests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scraping"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import PROJECT_ROOT, get_logger, load_settings  # noqa: E402
 
 PROCESSED = PROJECT_ROOT / "data" / "processed"
@@ -222,6 +224,10 @@ def main() -> None:
     pd.DataFrame(h1c_rows).to_csv(TABLES / "rq1_h1c.csv", index=False)
     preds.to_parquet(PROCESSED / "rq1_oos_predictions.parquet", index=False)
     logger.info("저장 outputs/tables/rq1_insample.csv, rq1_oos.csv, rq1_h1c.csv, data/processed/rq1_oos_predictions.parquet")
+
+    logger.info("[5/5] 그림 (outputs/figures)")
+    from rq1_figures import make_figures
+    make_figures(primary, logger)
 
 
 if __name__ == "__main__":

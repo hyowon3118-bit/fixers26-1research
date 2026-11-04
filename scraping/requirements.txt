@@ -5,3 +5,4 @@ pyyaml>=6.0
 beautifulsoup4>=4.12
 fredapi>=0.5.2
 statsmodels>=0.14
+matplotlib>=3.7
