@@ -7,13 +7,15 @@
   S        (A − F) / σ                     표준화 서프라이즈
   K, M     Kalshi 분포의 평균, 중앙값 (원본 get_moments 값)
   Gap      (K − F) / σ,  Gap_median = (M − F) / σ
-  W_iqr    (q75 − q25) / σ                 분포 폭 (주 지표)
+  W_iqr    (q75 − q25) / σ                 분포 폭 (주 지표, 구간 안 균등분포로 보간한 연속 분위수)
+  W_iqr_disc                               이산 분위수로 계산한 IQR (강건성)
   W_sd     분포 표준편차 / σ                분포 폭 (보조 지표)
   E_K      |A − K| / σ                     Kalshi 자체 예측오차
   cover50  q25 ≤ A ≤ q75,  cover80  q10 ≤ A ≤ q90   예측구간 적중 여부
 
-분위수: 구간 값 = 기준선 + moment_adjustment (원본 get_moments와 같은 값 매핑),
-        누적확률이 처음으로 p 이상이 되는 값 (내 정의, 근거 문헌 없음)
+분위수: 연속 분위수는 각 구간을 반올림 전 범위 (기준선 + 단위/2, 다음 기준선 + 단위/2]로 보고
+        구간 안 균등분포(Gürkaynak & Wolfers 2005)로 보간. 열린 꼬리 구간은 인접 구간 폭으로 닫음(Angelini 2026).
+        이산 분위수는 구간 값 = 기준선 + moment_adjustment에서 누적확률이 처음 p 이상인 값.
 측정 시점: Kalshi 거래 마감일(예정 발표일) h일 전 이하에서 가장 가까운 관측일
 
 입력: data/interim/kalshi_release_match.parquet, kalshi_moments.parquet, kalshi_dist.parquet, releases.parquet
@@ -51,18 +53,55 @@ def expanding_sigma(rel: pd.DataFrame, exclude: tuple[str, str], min_obs: int) -
     return pd.DataFrame(rows)
 
 
+PROBS = (0.10, 0.25, 0.75, 0.90)
+
+
+def bin_edges(strikes: np.ndarray, unit: float) -> tuple[np.ndarray, np.ndarray]:
+    """각 분포 행의 연속 구간 (lo, hi].
+
+    행 j(기준선 s_j)의 확률은 '발표치 > s_j 이고 <= s_{j+1}'이고, 발표치는 unit 단위로 반올림되므로
+    반올림 전 값의 범위는 (s_j + unit/2, s_{j+1} + unit/2]. 맨 위 열린 구간은 바로 아래 구간과 같은 폭으로 닫음
+    (Angelini 2026의 '인접 격자 폭' 처리). 맨 아래 행은 원본 코드가 이미 '최저 기준선 − 간격'에 두므로 그대로 씀.
+    """
+    lo = strikes + unit / 2
+    last_width = strikes[-1] - strikes[-2] if len(strikes) > 1 else unit
+    hi = np.append(strikes[1:], strikes[-1] + last_width) + unit / 2
+    return lo, hi
+
+
+def continuous_quantile(lo, hi, w, p) -> float:
+    """구간 안 균등분포 가정(Gürkaynak & Wolfers 2005)으로 분위수 보간."""
+    cw = np.cumsum(w)
+    j = int(np.argmax(cw >= p - 1e-12))
+    prev = cw[j - 1] if j > 0 else 0.0
+    frac = (p - prev) / w[j] if w[j] > 0 else 0.0
+    return float(lo[j] + frac * (hi[j] - lo[j]))
+
+
 def quantiles(dist: pd.DataFrame, adj: dict) -> pd.DataFrame:
-    """이벤트·날짜별 분포 분위수와 표준편차 (구간 값 = 기준선 + moment_adjustment)."""
+    """이벤트·날짜별 분위수와 표준편차.
+
+    주 지표: 연속 분위수 qXX (구간 안 균등분포 보간)
+    보조 지표: 이산 분위수 qXX_disc (구간 값 = 기준선 + moment_adjustment, 누적확률이 처음 p 이상인 값)
+    moment_adjustment는 각 시리즈의 발표 단위(0.1%p, 1000명)와 같아서 반올림 단위로도 씀.
+    """
     rows = []
     for (ev, d, s), g in dist.groupby(["contract_preamble", "date", "series"], sort=False):
         g = g.sort_values("strike")
-        x = g["strike"].to_numpy(float) + adj[s]
+        strikes = g["strike"].to_numpy(float)
+        unit = adj[s]
         w = g["probability"].to_numpy(float)
         w = w / w.sum()
+        x = strikes + unit
         cw = np.cumsum(w)
-        q = {f"q{int(p*100)}": x[int(np.argmax(cw >= p - 1e-12))] for p in (0.10, 0.25, 0.75, 0.90)}
+        lo, hi = bin_edges(strikes, unit)
         mu = (w * x).sum()
-        rows.append({"contract_preamble": ev, "date": d, **q, "dist_sd": float(np.sqrt((w * (x - mu) ** 2).sum()))})
+        row = {"contract_preamble": ev, "date": d,
+               "dist_sd": float(np.sqrt((w * (x - mu) ** 2).sum()))}
+        for p in PROBS:
+            row[f"q{int(p*100)}"] = continuous_quantile(lo, hi, w, p)
+            row[f"q{int(p*100)}_disc"] = x[int(np.argmax(cw >= p - 1e-12))]
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -107,13 +146,14 @@ def main() -> None:
                 if stale <= pcfg["max_stale_days"]:
                     row.update({"obs_date": c["date"].date(), "stale_days": stale, "K": c["mean"], "M": c["median"],
                                 "mode": c["mode"], "skewness": c["skewness"], "volume": c["daily_volume"],
-                                **{k: c[k] for k in ["q10", "q25", "q75", "q90", "dist_sd"]}})
+                                **{k: c[k] for k in ["q10", "q25", "q75", "q90", "q10_disc", "q25_disc", "q75_disc", "q90_disc", "dist_sd"]}})
             out.append(row)
     p = pd.DataFrame(out)
     p["S"] = (p["A"] - p["F"]) / p["sigma"]
     p["Gap"] = (p["K"] - p["F"]) / p["sigma"]
     p["Gap_median"] = (p["M"] - p["F"]) / p["sigma"]
-    p["W_iqr"] = (p["q75"] - p["q25"]) / p["sigma"]
+    p["W_iqr"] = (p["q75"] - p["q25"]) / p["sigma"]            # 주 지표: 연속 IQR
+    p["W_iqr_disc"] = (p["q75_disc"] - p["q25_disc"]) / p["sigma"]  # 강건성: 이산 IQR
     p["W_sd"] = p["dist_sd"] / p["sigma"]
     p["E_K"] = (p["A"] - p["K"]).abs() / p["sigma"]
     p["cover50"] = np.where(p["K"].isna(), np.nan, (p["A"] >= p["q25"] - 1e-9) & (p["A"] <= p["q75"] + 1e-9))
