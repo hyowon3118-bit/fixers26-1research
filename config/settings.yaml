@@ -73,3 +73,7 @@ event_panel:
 rq1:
   primary_series: ["KXCPI", "KXCPICORE"]   # 주 분석 표본 (계획서: CPI 중심)
   min_train: 12                            # 표본외 예측을 시작할 최소 학습 이벤트 수 (내 설정)
+
+rq2:
+  # 동등성 검정 기준: 표준화 서프라이즈 1σ당 금리 반응이 이 값(bp)보다 작으면 "경제적으로 무시할 만함" (내 판단)
+  equivalence_margin_bp: 1.0
