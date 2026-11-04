@@ -48,7 +48,8 @@ def load_markets(series: str, logger) -> pd.DataFrame:
     n0 = len(m)
     m = m[(m["strike_type"] == "greater") & m["floor_strike"].notna()].copy()
     logger.info("  계약 %d개 중 threshold(greater) 계약 %d개 사용, %d개 제외", n0, len(m), n0 - len(m))
-    m["strike"] = m["floor_strike"].astype(float)
+    # API가 4.1을 4.099999처럼 저장한 경우가 있어 소수 4자리로 반올림 (기준선 간격은 최소 0.1)
+    m["strike"] = m["floor_strike"].astype(float).round(4)
     m["close_time_et"] = pd.to_datetime(m["close_time"], utc=True, format="ISO8601").dt.tz_convert(ET)
     return m[["ticker", "event_ticker", "strike", "close_time_et", "result"]].assign(series=series)
 

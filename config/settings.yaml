@@ -62,3 +62,10 @@ clean_kalshi:
     # 아래 두 시리즈는 원본 논문의 발표 단위 분석에 없음 → 설정은 내 판단
     KXGDP:      {strike_int: null, moment_adjustment: 0.1,  days_before_horizon: 30}
     KXPAYROLLS: {strike_int: null, moment_adjustment: 1000, days_before_horizon: 30}
+
+event_panel:
+  horizons: [7, 1]              # 발표 며칠 전 Kalshi 분포를 쓸지 (연구설계 h)
+  max_stale_days: 3             # 목표일 이전 가장 가까운 관측일이 이보다 오래되면 결측 처리 (내 설정)
+  sigma_min_obs: 12             # σ 계산에 필요한 최소 과거 발표 수 (내 설정)
+  # 코로나 시기는 고용·실업률 서프라이즈를 6~7배 키워 σ를 왜곡해서 σ 계산에서 제외 (내 판단, 근거 문헌 없음)
+  sigma_exclude: ["2020-03-01", "2020-12-31"]
