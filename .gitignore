@@ -1,0 +1,13 @@
+# 데이터와 비밀 정보는 저장소에 올리지 않음
+data/**/*
+!data/**/
+!data/**/.gitkeep
+.env
+outputs/logs/*
+!outputs/logs/.gitkeep
+
+# 파이썬·OS 부산물
+__pycache__/
+*.pyc
+.DS_Store
+.ipynb_checkpoints/
