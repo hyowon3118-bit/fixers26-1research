@@ -15,4 +15,7 @@
 | RQ1 | `python src/analysis/rq1_forecast.py` (그림 포함) |
 | RQ3 | `python src/analysis/rq3_width.py` |
 | RQ2 | `python src/analysis/rq2_rates.py` (RQ1 결과 필요) |
+| 지표별 그림 | `python src/analysis/01_rq1_visualizations.py` (지표별 그림·요약표) |
 | 검증(선택) | `python tests/verify_against_r.py --r-repo <원본저장소>` (R 필요), `python scraping/06_dkw_reference.py` → `python tests/compare_with_dkw.py` |
+
+컨센서스 시점 기준은 `config/settings.yaml`의 `event_panel.consensus_vintage` (기본 `latest`, 한계는 docs/methods_kalshi_distribution.md 참고)

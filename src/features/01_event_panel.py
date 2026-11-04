@@ -2,7 +2,10 @@
 
 변수 정의 (연구설계 수정본 기준)
   A        실제 발표치 (가능한 시리즈는 ALFRED 최초 발표치, 없으면 ForexFactory actual)
-  F        측정 horizon 날짜까지 수집된 ForexFactory 컨센서스 스냅샷
+  F        ForexFactory 컨센서스. settings.yaml event_panel.consensus_vintage로 선택
+           - latest(기본): 가장 최근 수집본. 과거 값을 나중에 수집했으므로 사후 비교라는 한계를 명시
+           - strict: 측정 horizon 날짜까지 실제 수집된 스냅샷만 (앞으로 발표 전에 수집해둔 자료가 쌓이면 사용)
+           F_vintage_ok 열이 그 값이 측정 시점 이전 수집본인지 표시
   σ        같은 horizon에서 과거에 이용 가능했던 (A − F)의 expanding 표준편차
   S        (A − F) / σ                     표준화 서프라이즈
   K, M     Kalshi 분포의 평균, 중앙값 (원본 get_moments 값)
@@ -16,8 +19,7 @@
 분위수: 내부 구간은 반올림 전 범위 (기준선 + 단위/2, 다음 기준선 + 단위/2] 안에서 균등하다고 가정.
         최저·최고 열린 꼬리 안에 분위수가 놓이면 유한한 경계가 식별되지 않으므로 해당 분위수는 결측.
         이산 분위수는 구간 값 = 기준선 + moment_adjustment에서 누적확률이 처음 p 이상인 값.
-측정 시점: 실제 발표일 h일 전 이하에서 가장 가까운 Kalshi 관측일. F도 그 날짜까지
-          수집된 스냅샷만 사용하며, 사후 수집된 과거 컨센서스는 결측 처리.
+측정 시점: 실제 발표일 h일 전 이하에서 가장 가까운 Kalshi 관측일.
 
 입력: data/interim/kalshi_release_match.parquet, kalshi_moments.parquet, kalshi_dist.parquet, releases.parquet
 출력: data/processed/event_panel.parquet
@@ -42,8 +44,14 @@ ET = "America/New_York"
 
 
 def forecast_asof(events: pd.DataFrame, snapshots: pd.DataFrame, h: int,
-                  event_date_col: str) -> pd.DataFrame:
-    """h일 전까지 실제 수집된 마지막 컨센서스만 선택한다."""
+                  event_date_col: str, vintage: str = "strict") -> pd.DataFrame:
+    """컨센서스 선택.
+
+    strict: h일 전까지 실제 수집된 마지막 스냅샷만 사용. 사후 수집뿐이면 결측.
+    latest: 수집 시점과 관계없이 가장 최근 스냅샷 사용 (과거 컨센서스를 나중에 한꺼번에 수집한 경우.
+            ForexFactory의 과거 forecast가 발표 당시 값인지 보장되지 않는다는 한계를 명시해야 함)
+    F_vintage_ok는 그 값이 h일 전까지 실제로 수집된 것인지 표시 (latest에서도 기록).
+    """
     ev = events[["series", event_date_col]].drop_duplicates().copy()
     ev[event_date_col] = pd.to_datetime(ev[event_date_col]).dt.normalize()
     snap = snapshots.dropna(subset=["F", "scraped_at_utc"]).copy()
@@ -55,11 +63,12 @@ def forecast_asof(events: pd.DataFrame, snapshots: pd.DataFrame, h: int,
     for _, e in ev.iterrows():
         release_day = e[event_date_col]
         target_day = (release_day - pd.Timedelta(days=h)).date()
-        cand = snap[(snap["series"] == e["series"]) &
-                    (snap["release_date_et"] == release_day.date()) &
-                    (snap["scrape_date_et"] <= target_day)]
+        same = snap[(snap["series"] == e["series"]) & (snap["release_date_et"] == release_day.date())]
+        timely = same[same["scrape_date_et"] <= target_day]
+        cand = timely if vintage == "strict" else same
         f = cand.sort_values("scraped_at_utc").iloc[-1]["F"] if not cand.empty else np.nan
-        out.append({"series": e["series"], event_date_col: release_day.date(), "F_asof": f})
+        out.append({"series": e["series"], event_date_col: release_day.date(), "F_asof": f,
+                    "F_vintage_ok": not timely.empty})
     return pd.DataFrame(out)
 
 
@@ -163,20 +172,25 @@ def main() -> None:
     snap = mom.merge(qs, on=["contract_preamble", "date"], how="left")
     snap["date"] = pd.to_datetime(snap["date"])
 
-    logger.info("[3/4] 측정 시점별 패널 구성 (h=%s)", pcfg["horizons"])
+    vintage = pcfg.get("consensus_vintage", "latest")
+    logger.info("[3/4] 측정 시점별 패널 구성 (h=%s, 컨센서스 기준 %s)", pcfg["horizons"], vintage)
+    if vintage == "latest":
+        logger.warning("  컨센서스는 가장 최근 수집본을 씀. 과거 forecast가 발표 당시 값인지 보장되지 않는 사후 비교라는 한계를 명시할 것")
     out = []
     for h in pcfg["horizons"]:
-        f_ev = forecast_asof(ev, forecasts, h, "release_date_actual")
-        f_rel = forecast_asof(rel, forecasts, h, "release_date_et")
+        f_ev = forecast_asof(ev, forecasts, h, "release_date_actual", vintage)
+        f_rel = forecast_asof(rel, forecasts, h, "release_date_et", vintage)
         sig = expanding_sigma(rel, f_rel, tuple(pcfg["sigma_exclude"]), pcfg["sigma_min_obs"])
-        logger.info("  h=%d: 측정시점 이전 컨센서스 결측 %d / σ 미산출 %d",
-                    h, int(f_ev["F_asof"].isna().sum()), int(sig["sigma"].isna().sum()))
+        logger.info("  h=%d: 컨센서스 결측 %d / 측정 시점 이전 수집본 %d개 / σ 미산출 %d",
+                    h, int(f_ev["F_asof"].isna().sum()), int(f_ev["F_vintage_ok"].sum()),
+                    int(sig["sigma"].isna().sum()))
         for _, e in ev.iterrows():
             target = pd.Timestamp(e["release_date_actual"]) - pd.Timedelta(days=h)
             cand = snap[(snap["contract_preamble"] == e["event_ticker"]) & (snap["date"] <= target)]
             frow = f_ev[(f_ev["series"] == e["series"]) &
                         (f_ev["release_date_actual"] == pd.Timestamp(e["release_date_actual"]).date())]
             f_h = frow["F_asof"].iloc[0] if not frow.empty else np.nan
+            f_ok = bool(frow["F_vintage_ok"].iloc[0]) if not frow.empty else False
             srow = sig[(sig["series"] == e["series"]) &
                        (sig["release_date_et"] == pd.Timestamp(e["release_date_actual"]).date())]
             sigma = srow["sigma"].iloc[0] if not srow.empty else np.nan
@@ -184,7 +198,7 @@ def main() -> None:
             row = {"h": h, "event_ticker": e["event_ticker"], "series": e["series"],
                    "ref_period": e["ref_period"], "release_date_et": e["release_date_et"],
                    "release_date_actual": e["release_date_actual"], "delay_days": e["delay_days"],
-                   "target_date": target.date(), "A": e["A"], "F": f_h,
+                   "target_date": target.date(), "A": e["A"], "F": f_h, "F_vintage_ok": f_ok,
                    "sigma": sigma, "n_sigma": n_sigma}
             if not cand.empty:
                 c = cand.sort_values("date").iloc[-1]

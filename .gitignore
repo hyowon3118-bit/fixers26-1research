@@ -17,3 +17,4 @@ outputs/tables/*
 !outputs/tables/.gitkeep
 outputs/figures/*
 !outputs/figures/.gitkeep
+.venv/

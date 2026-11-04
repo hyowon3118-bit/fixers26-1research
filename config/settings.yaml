@@ -64,6 +64,9 @@ clean_kalshi:
     KXPAYROLLS: {strike_int: null, moment_adjustment: 1000, days_before_horizon: 30}
 
 event_panel:
+  # 컨센서스 시점 기준. latest: 가장 최근 수집본(과거 값을 사후 수집 → 한계 명시) | strict: 측정 시점 이전 수집본만
+  # 현재 ForexFactory 자료는 모두 2026-11-04에 수집해서 strict로는 과거 이벤트 컨센서스가 전부 결측됨
+  consensus_vintage: "latest"
   horizons: [7, 1]              # 발표 며칠 전 Kalshi 분포를 쓸지 (연구설계 h)
   max_stale_days: 3             # 목표일 이전 가장 가까운 관측일이 이보다 오래되면 결측 처리 (내 설정)
   sigma_min_obs: 12             # σ 계산에 필요한 최소 과거 발표 수 (내 설정)
