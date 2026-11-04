@@ -13,6 +13,7 @@ kalshi:
     - KXCPICORE    # core CPI
     - KXGDP        # GDP
     - KXU3         # 실업률
+    - KXPAYROLLS   # 비농업 고용 (수집 가능 여부 확인용)
   period_interval: 1440      # 캔들 간격(분). 1440 = 일봉
   request_sleep_sec: 0.15    # 요청 간 대기 (기본 등급 초당 10회 제한 대비)
 
