@@ -1,0 +1,44 @@
+# Kalshi 확률분포 구성 방법
+
+## 근거
+Diercks, Katz & Wright (2026), *Kalshi and the Rise of Macro Markets* 의 공개 코드를 파이썬으로 옮겼어.
+- 원본: `code/convert_trades_to_pdfs/convert_trade_level_data_cdfs.R` (포크: github.com/hyowon3118-bit/Prediction_Markets_Public)
+- 포팅: `src/clean/kalshi_dkw.py` (함수마다 대응하는 R 함수 이름 표시)
+- 실행: `src/clean/01_kalshi_distributions.py`
+
+## 단계 (원본과 같음)
+| 단계 | 원본 R 함수 | 내용 |
+|---|---|---|
+| 1 | `convert_to_daily` | 그날 마지막 체결가를 일별 가격으로 사용 |
+| 2 | `fill_dataless_days` | 거래 없는 날은 직전 체결가를 이어 씀. 마지막 거래일(만기) 기준 `days_before_horizon + 10`일 이전은 제거 |
+| 3 | `clean_data` (middle-out) | 가격이 49센트에 가장 가까운 기준선에서 왼쪽은 누적 최댓값, 오른쪽은 누적 최솟값으로 단조성 강제 |
+| 4 | `convert_to_probabilities` | 최저 기준선 아래 구간을 추가하고, `99 − 첫 가격`, 인접 가격 차이, `마지막 가격 − 1`로 구간 확률 계산 → 빠진 기준선은 0으로 채움 → 확률 0인 빈 구간이 생기면 바깥 확률을 중앙 쪽으로 옮김(swap) → 합 100으로 정규화 |
+| 5 | `get_moments` | 평균, 중앙값(matrixStats 가중중앙값), 최빈값, 분산, 왜도((평균−중앙값)/평균절대편차). 각 값에 `moment_adjustment`를 더해 "x 초과" 기준선을 실제 발표치 값으로 바꿈 |
+
+## 원본과 다른 점
+| 항목 | 원본 | 이 연구 | 이유 |
+|---|---|---|---|
+| 입력 자료 | 체결 단위 자료, UTC 날짜별 마지막 체결 | Kalshi 일봉의 종가, 미국 동부시간 자정 마감 | 01_kalshi.py가 일봉을 수집함. 필요하면 체결 단위 수집으로 바꿀 수 있음 |
+| 기준선 값 | ticker 문자열에서 정규식으로 추출 | API의 `floor_strike` | 원본 정규식은 음수 기준선(T-0.1 등)을 읽지 못해 해당 계약이 빠짐 |
+| swap 보호 행 | 49 초과 가격이 없으면 전체 데이터의 최댓값 위치 사용 | 해당 이벤트·날짜 안에서 찾음 | 원본 코드가 그룹 대신 전체 데이터(df)를 참조하는 문제로 보임 |
+| 첨도 | `DescTools::Kurt` | 계산 안 함 | 연구 변수에 쓰지 않음 |
+| GDP·고용 | 발표 단위 분석에 없음 | `strike_int: null`로 빈 기준선 채우기 생략, moment_adjustment는 발표 단위(0.1%p, 1000명) | 기준선 간격이 불규칙해서 원본처럼 격자를 채우면 가짜 빈 구간이 생김 (내 판단, 근거 문헌 없음) |
+
+## 강건성 옵션
+- `--price mid`: 호가 중간값. 원본 부록 A에서 비교한 방식이고, 원본은 꼬리 계약의 큰 호가 차이 때문에 주 분석에서 제외함
+- `--monotone right-to-left | left-to-right`: 원본 `clean_data`의 다른 단조성 방식
+
+## 검증 (tests/verify_against_r.py)
+같은 입력(일별 마지막 체결가)을 원본 R 함수와 파이썬 포팅에 각각 넣고 결과를 대조.
+
+| 시리즈 | 표본 | 구간 확률 최대 차이 | 통계량 |
+|---|---|---|---|
+| KXCPI | 이벤트 2개, 93 이벤트×일 | 7.1e-15 | 모두 일치 (아래 예외 2건) |
+| KXCPICORE | 이벤트 1개, 31 | 7.1e-15 | 모두 일치 |
+| KXU3 | 이벤트 1개, 31 | 7.1e-15 | 모두 일치 |
+| KXPAYROLLS (strike_int 50000으로 격자 경로 점검) | 이벤트 1개, 31 | 3.6e-15 | 모두 일치 |
+
+- 예외: 누적확률이 정확히 50%에 걸린 분포 2건에서 왜도가 달랐어. 원본 R은 합계를 확장 정밀도로 계산해서
+  마지막 자리 차이로 중앙값이 옆 값으로 넘어가. 분포 자체는 같고, 경계 동률은 검증 스크립트가 따로 세서 보고해.
+- 원본 R의 음수 기준선 문제 때문에 대조는 0 이상 기준선만으로 했어.
+- 실행 환경: R 4.3.3, dplyr·tidyr·matrixStats·collapse (Ubuntu apt 패키지)

@@ -48,14 +48,17 @@ ecos:
   item_name_contains: "국고채(2년)"     # 항목 이름으로 코드를 자동 탐색
 
 clean_kalshi:
-  # 일별 확률로 쓸 가격: mid(매수·매도 호가 중간값), trade(당일 마지막 체결가), prev(직전 체결가)
-  # 앞에서부터 차례로 시도하고, 값이 없으면 다음 규칙으로 넘어감
-  price_rules: ["mid", "trade"]
-  max_spread: 0.20            # 호가 차이가 이보다 크면 중간값을 쓰지 않음 (정보가 거의 없는 호가)
-  # 발표치의 최소 단위 (계약 규칙 기준. 구간 대표값 계산에 사용)
-  resolution:
-    KXCPI: 0.1
-    KXCPICORE: 0.1
-    KXU3: 0.1
-    KXGDP: 0.1
-    KXPAYROLLS: 1000
+  # 방법은 Diercks, Katz & Wright (2026) 공개 코드를 따름 (src/clean/kalshi_dkw.py)
+  price_method: "last"          # last: 그날 마지막 체결가(원본 기본) | mid: 호가 중간값(원본 부록 A 비교용)
+  monotone_method: "middle-out" # 원본 기본. 강건성: right-to-left, left-to-right
+  max_spread: 0.20              # mid 사용 시 호가 차이가 이보다 크면 제외 (내 설정, 원본에 없음)
+  series:
+    # strike_int: 기준선 간격 (원본 인자). null이면 간격이 불규칙해서 빈 기준선 채우기를 하지 않음
+    # moment_adjustment: 기준선 값 → 실제 발표치 값 보정 (원본 인자, "x 초과"는 x+0.1부터)
+    # days_before_horizon: 만기 전 며칠까지 분포를 남길지 (원본 CPI·실업률 설정 30일)
+    KXCPI:      {strike_int: 0.1,  moment_adjustment: 0.1,  days_before_horizon: 30}
+    KXCPICORE:  {strike_int: 0.1,  moment_adjustment: 0.1,  days_before_horizon: 30}
+    KXU3:       {strike_int: 0.1,  moment_adjustment: 0.1,  days_before_horizon: 30}
+    # 아래 두 시리즈는 원본 논문의 발표 단위 분석에 없음 → 설정은 내 판단
+    KXGDP:      {strike_int: null, moment_adjustment: 0.1,  days_before_horizon: 30}
+    KXPAYROLLS: {strike_int: null, moment_adjustment: 1000, days_before_horizon: 30}
